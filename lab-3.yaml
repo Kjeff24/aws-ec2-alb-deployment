@@ -1,0 +1,384 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CloudFormation template to deploy a web app on EC2 instances in a private subnet with an ALB in public subnets across two availability zones
+
+Parameters:
+  VpcCIDR:
+    Type: String
+    Default: "10.0.0.0/16"
+    Description: The CIDR block for the VPC
+  PublicSubnet1CIDR:
+    Type: String
+    Default: "10.0.1.0/24"
+  PublicSubnet2CIDR:
+    Type: String
+    Default: "10.0.2.0/24"
+  PrivateSubnet1CIDR:
+    Type: String
+    Default: "10.0.3.0/24"
+  PrivateSubnet2CIDR:
+    Type: String
+    Default: "10.0.4.0/24"
+  InstanceType:
+    Type: String
+    Default: "t2.micro"
+    Description: EC2 instance type
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: Name of an existing EC2 KeyPair to SSH into the instances
+  ImageId:
+    Type: String
+    Default: "ami-06b21ccaeff8cd686" # Amazon Linux 2 AMI ID for us-east-1
+    Description: AMI ID for the EC2 instances (Amazon Linux 2)
+
+Resources:
+  # VPC and Subnets
+  MyVpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCIDR
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: "WebAppVPC"
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MyVpc
+      CidrBlock: !Ref PublicSubnet1CIDR
+      AvailabilityZone: "us-east-1a"
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: "PublicSubnet1"
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MyVpc
+      CidrBlock: !Ref PublicSubnet2CIDR
+      AvailabilityZone: "us-east-1b"
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: "PublicSubnet2"
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MyVpc
+      CidrBlock: !Ref PrivateSubnet1CIDR
+      AvailabilityZone: "us-east-1a"
+      Tags:
+        - Key: Name
+          Value: "PrivateSubnet1"
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MyVpc
+      CidrBlock: !Ref PrivateSubnet2CIDR
+      AvailabilityZone: "us-east-1b"
+      Tags:
+        - Key: Name
+          Value: "PrivateSubnet2"
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: "WebAppIGW"
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref MyVpc
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref MyVpc
+      Tags:
+        - Key: Name
+          Value: "PublicRouteTable"
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: "0.0.0.0/0"
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  # Security Groups
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref MyVpc
+      GroupDescription: "Security Group for ALB"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: "0.0.0.0/0"
+
+  EC2InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref MyVpc
+      GroupDescription: "Security Group for EC2 instances"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: "0.0.0.0/0"
+
+  # Load Balancer and Target Group
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: "WebAppALB"
+      Subnets:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      Scheme: internet-facing
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref MyVpc
+      Port: 80
+      Protocol: HTTP
+      TargetType: instance
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /
+      HealthCheckIntervalSeconds: 30
+
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+
+  # Launch Template
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        ImageId: !Ref ImageId
+        InstanceType: !Ref InstanceType
+        KeyName: !Ref KeyName
+        SecurityGroupIds:
+          - !Ref EC2InstanceSecurityGroup
+        UserData:
+          Fn::Base64: |
+            #!/bin/bash
+            # Create the HTML directory and HTML file
+              mkdir -p /home/ec2-user/html
+              echo "<!DOCTYPE html>
+              <html lang="en">
+              <head>
+              <meta charset="UTF-8">
+              <meta name="viewport" content="width=device-width, initial-scale=1.0">
+              <title>Kjeff24</title>
+              <style>
+              /* Global Styles */
+              * {
+              margin: 0;
+                padding: 0;
+                box-sizing: border-box;
+                font-family: Arial, sans-serif;
+            }
+              body {
+            line-height: 1.6;
+            background-color: #f4f4f9;
+            color: #333;
+            }
+              a {
+            text-decoration: none;
+            color: #333;
+            }
+            
+              /* Navbar */
+              .navbar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 1rem 2rem;
+            background-color: #333;
+            color: #fff;
+            }
+              .navbar a {
+            color: #fff;
+            margin: 0 0.5rem;
+            }
+              .navbar a:hover {
+            color: #ddd;
+            }
+            
+              /* Hero Section */
+              .hero {
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            padding: 3rem;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: #fff;
+            text-align: center;
+            }
+              .hero h1 {
+            font-size: 3rem;
+            margin-bottom: 1rem;
+            }
+              .hero p {
+            font-size: 1.2rem;
+            margin-bottom: 1.5rem;
+            }
+              .hero button {
+            padding: 0.7rem 1.5rem;
+            background-color: #333;
+            color: #fff;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 1rem;
+            }
+              .hero button:hover {
+            background-color: #555;
+            }
+            
+              /* Features Section */
+              .features {
+            display: flex;
+            justify-content: space-around;
+            padding: 3rem 2rem;
+            background-color: #fff;
+            text-align: center;
+            }
+              .feature {
+            flex: 1;
+            padding: 1rem;
+            margin: 0 1rem;
+            }
+              .feature h3 {
+            font-size: 1.5rem;
+            color: #764ba2;
+            margin-bottom: 1rem;
+            }
+              .feature p {
+            color: #555;
+            }
+            
+              /* Footer */
+              .footer {
+            padding: 1rem 2rem;
+            text-align: center;
+            background-color: #333;
+            color: #fff;
+            margin-top: 2rem;
+            }
+              </style>
+              </head>
+              <body>
+            
+              <!-- Navbar -->
+              <div class="navbar">
+              <h2>Kjeff24</h2>
+              <nav>
+              <a href="#home">Home</a>
+              <a href="#about">About</a>
+              <a href="#services">Services</a>
+              <a href="#contact">Contact</a>
+              </nav>
+              </div>
+            
+              <!-- Hero Section -->
+              <section class="hero" id="home">
+              <h1>Welcome to My Awesome Website</h1>
+              <p>Your one-stop solution for amazing web experiences</p>
+              <button>Get Started</button>
+              </section>
+            
+              <!-- Features Section -->
+              <section class="features" id="about">
+              <div class="feature">
+              <h3>Feature One</h3>
+              <p>Learn more about our amazing feature that offers unmatched functionality.</p>
+              </div>
+              <div class="feature">
+              <h3>Feature Two</h3>
+              <p>Our second feature is designed with your needs in mind for maximum efficiency.</p>
+              </div>
+              <div class="feature">
+              <h3>Feature Three</h3>
+              <p>Discover our third feature that provides a unique experience for users.</p>
+              </div>
+              </section>
+            
+              <!-- Footer -->
+              <div class="footer" id="contact">
+              <p>&copy; 2024 Kjeff24. All rights reserved.</p>
+              <p>Follow us on
+              <a href="#">Facebook</a> |
+              <a href="#">Twitter</a> |
+              <a href="#">Instagram</a>
+              </p>
+              </div>
+            
+              </body>
+              </html>
+              " > /home/ec2-user/html/index.html
+              # Start Python HTTP server in the background
+              nohup python3 -m http.server 80 --directory /home/ec2-user/html > /home/ec2-user/server.log 2>&1 &
+
+
+  # Auto Scaling Group
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      MinSize: 2
+      MaxSize: 4
+      DesiredCapacity: 2
+      TargetGroupARNs:
+        - !Ref TargetGroup
+      Tags:
+        - Key: Name
+          Value: "WebAppInstance"
+          PropagateAtLaunch: true
+
+
+Outputs:
+  LoadBalancerDNSName:
+    Description: "DNS name of the load balancer"
+    Value: !GetAtt LoadBalancer.DNSName
