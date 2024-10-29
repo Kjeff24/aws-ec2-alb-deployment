@@ -7,7 +7,7 @@ This CloudFormation template deploys a web application on EC2 instances located 
 ## Template Details
 
 - **AWSTemplateFormatVersion:** '2010-09-09'
-- **Description:** Deploy a web application on EC2 instances with an ALB in public subnets across two availability zones.
+- **Description:** Deploy a web application on EC2 instances with an ALB in public subnets across two availability zones in US East (N. Virginia).
 
 ## Parameters
 
